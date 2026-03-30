@@ -1,0 +1,8 @@
+torch
+transformers
+numpy
+matplotlib
+line_profiler
+memory_profiler
+jupyter
+ipywidgets
