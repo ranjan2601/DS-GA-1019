@@ -1,0 +1,15 @@
+[project]
+name = "llm-inference-optimization"
+version = "0.1.0"
+description = "Performance optimization of local LLM inference in Python (DS-GA 1019)"
+requires-python = ">=3.11"
+dependencies = [
+    "torch",
+    "transformers",
+    "numpy",
+    "matplotlib",
+    "line_profiler",
+    "memory_profiler",
+    "jupyter",
+    "ipywidgets",
+]
