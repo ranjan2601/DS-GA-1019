@@ -2,6 +2,7 @@ torch
 transformers
 numpy
 matplotlib
+numba
 line_profiler
 memory_profiler
 jupyter

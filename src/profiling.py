@@ -1,13 +1,17 @@
 """
 Profiling utilities for identifying inference bottlenecks.
 
-Wraps cProfile and provides helpers for line_profiler integration.
+Provides wrappers for:
+- cProfile (function-level)
+- line_profiler (line-level hotspots)
+- memory_profiler (memory usage over time)
 """
 
 import cProfile
 import pstats
 import io
 import os
+import tracemalloc
 
 import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
@@ -79,4 +83,117 @@ def get_model_memory_footprint(model: PreTrainedModel) -> dict:
         "buffer_memory_mb": buffer_bytes / (1024 ** 2),
         "total_memory_mb": total_mb,
         "dtype": str(next(model.parameters()).dtype),
+    }
+
+
+# ── line_profiler ────────────────────────────────────────────────────────────
+
+
+def _unwrap(func):
+    """Unwrap decorated functions (e.g., @torch.no_grad) to get the real function."""
+    while hasattr(func, "__wrapped__"):
+        func = func.__wrapped__
+    return func
+
+
+def line_profile_function(func, *args, **kwargs):
+    """
+    Run line_profiler on a single function call and return the report string.
+
+    Automatically unwraps decorators like @torch.no_grad() so that the
+    actual function body is profiled, not the wrapper.
+
+    Usage:
+        from src.inference import generate_manual
+        report = line_profile_function(generate_manual, model, tokenizer, "Hello")
+    """
+    from line_profiler import LineProfiler
+
+    inner_func = _unwrap(func)
+    lp = LineProfiler()
+    lp.add_function(inner_func)
+    wrapped = lp(func)
+    result = wrapped(*args, **kwargs)
+
+    stream = io.StringIO()
+    lp.print_stats(stream=stream)
+
+    return {
+        "result": result,
+        "report": stream.getvalue(),
+    }
+
+
+def line_profile_with_subroutines(func, sub_functions, *args, **kwargs):
+    """
+    Run line_profiler on a function AND specified sub-functions.
+
+    This lets you profile the generate loop AND the inner functions
+    it calls (e.g., model forward, softmax, sampling).
+
+    Usage:
+        report = line_profile_with_subroutines(
+            generate_manual,
+            [torch.softmax, torch.multinomial],
+            model, tokenizer, "Hello",
+        )
+    """
+    from line_profiler import LineProfiler
+
+    inner_func = _unwrap(func)
+    lp = LineProfiler()
+    lp.add_function(inner_func)
+    for sub_fn in sub_functions:
+        lp.add_function(sub_fn)
+
+    wrapped = lp(func)
+    result = wrapped(*args, **kwargs)
+
+    stream = io.StringIO()
+    lp.print_stats(stream=stream)
+
+    return {
+        "result": result,
+        "report": stream.getvalue(),
+    }
+
+
+# ── memory_profiler ──────────────────────────────────────────────────────────
+
+
+def memory_profile_generate(
+    model: PreTrainedModel,
+    tokenizer: PreTrainedTokenizer,
+    prompt: str,
+    generate_fn,
+    max_new_tokens: int = MAX_NEW_TOKENS,
+) -> dict:
+    """
+    Track Python memory allocation during a generation call using tracemalloc.
+
+    Returns peak memory, current memory, and top allocation sites.
+    """
+    tracemalloc.start()
+
+    result = generate_fn(model, tokenizer, prompt, max_new_tokens=max_new_tokens)
+
+    snapshot = tracemalloc.take_snapshot()
+    current, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+
+    # Top 15 allocation sites
+    top_stats = snapshot.statistics("lineno")
+    top_allocations = []
+    for stat in top_stats[:15]:
+        top_allocations.append({
+            "file": str(stat.traceback),
+            "size_kb": stat.size / 1024,
+            "count": stat.count,
+        })
+
+    return {
+        "generation_result": result,
+        "current_memory_mb": current / (1024 ** 2),
+        "peak_memory_mb": peak / (1024 ** 2),
+        "top_allocations": top_allocations,
     }
