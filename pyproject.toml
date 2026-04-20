@@ -13,4 +13,6 @@ dependencies = [
     "memory_profiler",
     "jupyter",
     "ipywidgets",
+    "streamlit",
+    "torchvision>=0.26.0",
 ]
