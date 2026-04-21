@@ -11,7 +11,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from src.config import MAX_NEW_TOKENS, TEMPERATURE, TOP_K
+from src.config import MAX_NEW_TOKENS, TEMPERATURE, TOP_K, AVAILABLE_MODELS, format_prompt
 
 st.set_page_config(
     page_title="Inference Optimization Lab",
@@ -189,16 +189,16 @@ hr { border-color: var(--border) !important; margin: 1rem 0 !important; }
 # ── Model loading ──────────────────────────────────────────────────────────────
 
 @st.cache_resource(show_spinner=False)
-def load_base_model():
+def load_base_model(model_id: str):
     from src.model import load_model_and_tokenizer
-    return load_model_and_tokenizer()
+    return load_model_and_tokenizer(model_id)
 
 
 @st.cache_resource(show_spinner=False)
-def load_quantized_model():
+def load_quantized_model(model_id: str):
     from src.model import load_model_and_tokenizer
     from src.quantization import quantize_model
-    model, tokenizer = load_model_and_tokenizer()
+    model, tokenizer = load_model_and_tokenizer(model_id)
     return quantize_model(model), tokenizer
 
 
@@ -232,9 +232,17 @@ MODES = {
 with st.sidebar:
     st.markdown("### Model")
 
-    with st.spinner("Loading…"):
+    selected_model_label = st.selectbox(
+        "model_select",
+        list(AVAILABLE_MODELS.keys()),
+        index=0,
+        label_visibility="collapsed",
+    )
+    selected_model_id = AVAILABLE_MODELS[selected_model_label]
+
+    with st.spinner(f"Loading {selected_model_label}…"):
         try:
-            model, tokenizer = load_base_model()
+            model, tokenizer = load_base_model(selected_model_id)
         except Exception as e:
             st.error(f"Load failed: {e}")
             st.stop()
@@ -261,7 +269,7 @@ with st.sidebar:
 
 # ── Header ─────────────────────────────────────────────────────────────────────
 
-st.markdown("""
+st.markdown(f"""
 <div style="margin-bottom:1.6rem;">
   <div style="font-family:'IBM Plex Sans',sans-serif;font-size:1.35rem;font-weight:600;
               color:#e4e8f0;letter-spacing:-0.01em;margin-bottom:0.2rem;">
@@ -269,7 +277,7 @@ st.markdown("""
   </div>
   <div style="font-family:'IBM Plex Mono',monospace;font-size:0.7rem;color:#363e52;
               letter-spacing:0.04em;">
-    DS-GA 1019 &nbsp;·&nbsp; KV-Cache &nbsp;·&nbsp; INT8 Quantization &nbsp;·&nbsp; Async Batching &nbsp;·&nbsp; Numba JIT
+    DS-GA 1019 &nbsp;·&nbsp; {selected_model_label} &nbsp;·&nbsp; KV-Cache &nbsp;·&nbsp; INT8 Quantization &nbsp;·&nbsp; Async Batching &nbsp;·&nbsp; Numba JIT
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -311,26 +319,27 @@ with tab_gen:
                 output_slot.warning("Enter a prompt first.")
             else:
                 with st.spinner("Generating…"):
+                    formatted_prompt = format_prompt(prompt, selected_model_id)
                     try:
                         if mode == "baseline":
                             from src.inference import generate_manual
-                            result = generate_manual(model, tokenizer, prompt,
+                            result = generate_manual(model, tokenizer, formatted_prompt,
                                 max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
 
                         elif mode == "kv_cache":
                             from src.kv_cache import generate_with_kv_cache
-                            result = generate_with_kv_cache(model, tokenizer, prompt,
+                            result = generate_with_kv_cache(model, tokenizer, formatted_prompt,
                                 max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
 
                         elif mode == "quantized":
-                            q_model, _ = load_quantized_model()
+                            q_model, _ = load_quantized_model(selected_model_id)
                             from src.quantization import generate_quantized
-                            result = generate_quantized(q_model, tokenizer, prompt,
+                            result = generate_quantized(q_model, tokenizer, formatted_prompt,
                                 max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)
 
                         elif mode == "batched":
                             from src.async_batching import generate_batched
-                            result = generate_batched(model, tokenizer, [prompt],
+                            result = generate_batched(model, tokenizer, [formatted_prompt],
                                 max_new_tokens=max_new_tokens, temperature=temperature, top_k=top_k)[0]
 
                     except Exception as exc:
@@ -338,7 +347,13 @@ with tab_gen:
                         st.stop()
 
                 text = result["text"]
-                continuation = text[len(prompt):] if text.startswith(prompt) else text
+                # Strip template prefix for chat models — show only the assistant reply
+                if text.startswith(formatted_prompt):
+                    continuation = text[len(formatted_prompt):]
+                elif "<|assistant|>" in text:
+                    continuation = text.split("<|assistant|>")[-1].strip()
+                else:
+                    continuation = text[len(prompt):]
                 tok_s = result.get("tok_per_sec", 0)
                 baseline_ref = 17.92
                 speedup = tok_s / baseline_ref if baseline_ref else 0
@@ -347,7 +362,7 @@ with tab_gen:
 <div style="background:#161b27;border:1px solid #252d3d;border-radius:3px;
             padding:1rem 1.1rem;min-height:7rem;font-family:'IBM Plex Mono',monospace;
             font-size:0.8rem;line-height:1.7;color:#6b7a99;word-break:break-word;">
-  <span style="color:#c8d0e0;">{prompt}</span><span style="color:#8ba4cc;">{continuation}</span>
+  <span style="color:#c8d0e0;">{prompt} </span><span style="color:#8ba4cc;">{continuation.strip()}</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -404,20 +419,30 @@ with tab_compare:
     if cmp_btn and cmp_prompt.strip():
         def _run(label, prmpt, mx):
             key = MODES[label]
+            fp = format_prompt(prmpt, selected_model_id)
             kw = dict(max_new_tokens=mx, temperature=temperature, top_k=top_k)
             if key == "baseline":
                 from src.inference import generate_manual
-                return generate_manual(model, tokenizer, prmpt, **kw)
+                return generate_manual(model, tokenizer, fp, **kw)
             elif key == "kv_cache":
                 from src.kv_cache import generate_with_kv_cache
-                return generate_with_kv_cache(model, tokenizer, prmpt, **kw)
+                return generate_with_kv_cache(model, tokenizer, fp, **kw)
             elif key == "quantized":
-                q_mdl, _ = load_quantized_model()
+                q_mdl, _ = load_quantized_model(selected_model_id)
                 from src.quantization import generate_quantized
-                return generate_quantized(q_mdl, tokenizer, prmpt, **kw)
+                return generate_quantized(q_mdl, tokenizer, fp, **kw)
             elif key == "batched":
                 from src.async_batching import generate_batched
-                return generate_batched(model, tokenizer, [prmpt], **kw)[0]
+                return generate_batched(model, tokenizer, [fp], **kw)[0]
+
+        def _extract_reply(res, prmpt):
+            text = res["text"]
+            if "<|assistant|>" in text:
+                return text.split("<|assistant|>")[-1].strip()
+            fp = format_prompt(prmpt, selected_model_id)
+            if text.startswith(fp):
+                return text[len(fp):].strip()
+            return text[len(prmpt):].strip()
 
         with st.spinner("Running…"):
             res_a = _run(mode_a_label, cmp_prompt, cmp_tokens)
@@ -425,8 +450,9 @@ with tab_compare:
 
         ra, rb = st.columns(2)
 
-        def _render_result(col, label, res):
+        def _render_result(col, label, res, prmpt):
             tok_s = res.get("tok_per_sec", 0)
+            reply = _extract_reply(res, prmpt)
             with col:
                 st.markdown(f"""
 <div style="font-family:'IBM Plex Sans',sans-serif;font-size:0.78rem;font-weight:500;
@@ -437,13 +463,13 @@ with tab_compare:
             padding:0.9rem 1rem;font-family:'IBM Plex Mono',monospace;
             font-size:0.77rem;line-height:1.65;color:#8ba4cc;min-height:6rem;
             word-break:break-word;">
-  {res['text'][:300]}{'…' if len(res['text']) > 300 else ''}
+  {reply[:300]}{'…' if len(reply) > 300 else ''}
 </div>
 """, unsafe_allow_html=True)
                 st.metric("Tokens / sec", f"{tok_s:.1f}")
 
-        _render_result(ra, mode_a_label, res_a)
-        _render_result(rb, mode_b_label, res_b)
+        _render_result(ra, mode_a_label, res_a, cmp_prompt)
+        _render_result(rb, mode_b_label, res_b, cmp_prompt)
 
         tok_a = res_a.get("tok_per_sec", 0)
         tok_b = res_b.get("tok_per_sec", 0)
@@ -469,7 +495,7 @@ with tab_bench:
     st.markdown("""
 <div style="font-family:'IBM Plex Mono',monospace;font-size:0.7rem;color:#363e52;
             margin-bottom:1.2rem;letter-spacing:0.02em;">
-  10 prompts · 5 runs each · CPU · pre-computed
+  GPT-2 124M · 10 prompts · 5 runs each · CPU · pre-computed
 </div>
 """, unsafe_allow_html=True)
 
