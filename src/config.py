@@ -3,7 +3,28 @@ Central configuration for the LLM inference optimization project.
 """
 
 # ── Model ────────────────────────────────────────────────────────────────────
-MODEL_NAME = "gpt2"  # HuggingFace model id (GPT-2 124M)
+MODEL_NAME = "gpt2"  # default model
+
+AVAILABLE_MODELS = {
+    "GPT-2 (124M)":       "gpt2",
+    "TinyLlama (1.1B)":   "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "Pythia (1B)":        "EleutherAI/pythia-1b",
+}
+
+# Models that are instruction-tuned and need a chat prompt template
+CHAT_MODELS = {
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+}
+
+def format_prompt(user_input: str, model_id: str) -> str:
+    """Wrap user input in the appropriate prompt template for the model."""
+    if model_id in CHAT_MODELS:
+        return (
+            f"<|system|>\nYou are a helpful assistant.</s>\n"
+            f"<|user|>\n{user_input}</s>\n"
+            f"<|assistant|>\n"
+        )
+    return user_input
 MAX_NEW_TOKENS = 200  # fixed generation length for all benchmarks
 TEMPERATURE = 1.0
 TOP_K = 50
