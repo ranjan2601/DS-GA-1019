@@ -11,7 +11,12 @@ import torch
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from src.config import MAX_NEW_TOKENS, TEMPERATURE, TOP_K, AVAILABLE_MODELS, format_prompt
+from src.config import (
+    MAX_NEW_TOKENS, TEMPERATURE, TOP_K,
+    AVAILABLE_MODELS, format_prompt,
+    OPTIMIZATION_MODES, BENCHMARK_RESULTS, BENCHMARK_RESULTS_CONTEXT,
+    BASELINE_PROBE_PROMPT, BASELINE_PROBE_TOKENS,
+)
 
 st.set_page_config(
     page_title="Inference Optimization Lab",
@@ -202,6 +207,17 @@ def load_quantized_model(model_id: str):
     return quantize_model(model), tokenizer
 
 
+@st.cache_data(show_spinner=False)
+def measure_baseline(_model, _tokenizer, model_id: str) -> float:
+    """Run a single warm-up + timed baseline pass. Keyed on model_id so it
+    re-measures automatically when the model selection changes."""
+    from src.inference import generate_manual
+    probe = "The meaning of life is"
+    generate_manual(_model, _tokenizer, BASELINE_PROBE_PROMPT, max_new_tokens=BASELINE_PROBE_TOKENS)          # warm-up
+    result = generate_manual(_model, _tokenizer, BASELINE_PROBE_PROMPT, max_new_tokens=BASELINE_PROBE_TOKENS) # timed
+    return result["tok_per_sec"]
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def speedup_color(x: float) -> str:
@@ -211,20 +227,44 @@ def speedup_color(x: float) -> str:
     return "#f87171"
 
 
-KNOWN_RESULTS = [
-    {"label": "Baseline",           "tok_s": 17.92,  "speedup": 1.00, "mem_mb": 474.7},
-    {"label": "KV-Cache",           "tok_s": 74.65,  "speedup": 4.17, "mem_mb": 474.7},
-    {"label": "Quant + KV-Cache",   "tok_s": 22.44,  "speedup": 1.25, "mem_mb": 268.5},
-    {"label": "Batch (bs=4) + KV",  "tok_s": 130.76, "speedup": 7.30, "mem_mb": 474.7},
-    {"label": "All Combined",       "tok_s": 47.49,  "speedup": 2.65, "mem_mb": 268.5},
+OPTIMIZATION_DESCRIPTIONS = [
+    (
+        "KV-Cache",
+        "Without caching, the model re-reads every previous token on each generation step — so generating token 100 requires 99 unnecessary re-computations. KV-Cache saves the key and value tensors from each attention layer after they're computed, so each new token only needs a single forward pass over itself.",
+    ),
+    (
+        "INT8 Quantization",
+        "Model weights are stored as 32-bit floats by default (~4 bytes each). Quantization maps them to 8-bit integers (~1 byte each), cutting memory by ~4×. On the fly, weights are converted back to float for the actual matrix multiply. This saves memory but adds a small dequantization cost on CPU.",
+    ),
+    (
+        "Async Batching",
+        "Processing one prompt at a time leaves most of the CPU idle. Batching groups multiple prompts into a single forward pass so the matrix operations are larger and hardware is used more efficiently. Async batching adds a queue on top so requests can be collected and dispatched together without blocking.",
+    ),
+    (
+        "Numba JIT (INT8 matmul)",
+        "Python loops are slow. The INT8 matrix multiply inside quantization is reimplemented as a Numba @njit kernel, which compiles it to native machine code at first call. This removes Python interpreter overhead for the most compute-intensive part of the quantized forward pass.",
+    ),
 ]
 
-MODES = {
-    "Baseline":              "baseline",
-    "KV-Cache":              "kv_cache",
-    "Quantized + KV-Cache":  "quantized",
-    "Batched (bs=4) + KV":   "batched",
-}
+
+def render_optimization_explainers():
+    st.divider()
+    st.markdown("### How each optimization works")
+    d1, d2 = st.columns(2)
+    for i, (title, desc) in enumerate(OPTIMIZATION_DESCRIPTIONS):
+        with (d1 if i % 2 == 0 else d2):
+            st.markdown(f"""
+<div style="background:#161b27;border:1px solid #252d3d;border-radius:3px;
+            padding:0.85rem 1rem;margin-bottom:0.6rem;">
+  <div style="font-family:'IBM Plex Sans',sans-serif;font-size:0.78rem;font-weight:600;
+              color:#e4e8f0;margin-bottom:0.35rem;">{title}</div>
+  <div style="font-family:'IBM Plex Sans',sans-serif;font-size:0.77rem;
+              color:#6b7a99;line-height:1.6;">{desc}</div>
+</div>
+""", unsafe_allow_html=True)
+
+
+MODES = OPTIMIZATION_MODES
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────────────
@@ -252,11 +292,15 @@ with st.sidebar:
     mem_mb = get_model_size_mb(model)
     device = "CUDA" if torch.cuda.is_available() else "CPU"
 
+    with st.spinner("Measuring baseline…"):
+        baseline_ref = measure_baseline(model, tokenizer, selected_model_id)
+
     st.markdown(f"""
 <div style="font-family:'IBM Plex Mono',monospace;font-size:0.72rem;line-height:2;color:#6b7a99;">
   <div><span style="color:#4a9eff;">{model_name}</span></div>
   <div>Device&nbsp;&nbsp;{device}</div>
   <div>Memory&nbsp;&nbsp;{mem_mb:.0f} MB</div>
+  <div>Baseline&nbsp;{baseline_ref:.1f} tok/s ({BASELINE_PROBE_TOKENS} tokens)</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -355,7 +399,6 @@ with tab_gen:
                 else:
                     continuation = text[len(prompt):]
                 tok_s = result.get("tok_per_sec", 0)
-                baseline_ref = 17.92
                 speedup = tok_s / baseline_ref if baseline_ref else 0
 
                 output_slot.markdown(f"""
@@ -393,6 +436,8 @@ with tab_gen:
   output will appear here
 </div>
 """, unsafe_allow_html=True)
+
+    render_optimization_explainers()
 
 
 # ── TAB: Compare ───────────────────────────────────────────────────────────────
@@ -487,21 +532,23 @@ with tab_compare:
 </div>
 """, unsafe_allow_html=True)
 
+    render_optimization_explainers()
+
 
 # ── TAB: Benchmark Results ──────────────────────────────────────────────────────
 
 with tab_bench:
     st.markdown("### Benchmark results")
-    st.markdown("""
+    st.markdown(f"""
 <div style="font-family:'IBM Plex Mono',monospace;font-size:0.7rem;color:#363e52;
             margin-bottom:1.2rem;letter-spacing:0.02em;">
-  GPT-2 124M · 10 prompts · 5 runs each · CPU · pre-computed
+  {BENCHMARK_RESULTS_CONTEXT}
 </div>
 """, unsafe_allow_html=True)
 
     # Results table
     rows_html = ""
-    for r in KNOWN_RESULTS:
+    for r in BENCHMARK_RESULTS:
         sp = r["speedup"]
         bar_pct = min(sp / 7.5 * 100, 100)
         sc = speedup_color(sp)
@@ -576,3 +623,5 @@ with tab_bench:
               color:#6b7a99;line-height:1.55;">{desc}</div>
 </div>
 """, unsafe_allow_html=True)
+
+    render_optimization_explainers()
