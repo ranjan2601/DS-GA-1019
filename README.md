@@ -33,14 +33,6 @@ uv sync
 
 `uv sync` creates a `.venv/` directory and installs all pinned dependencies from `pyproject.toml` and `uv.lock` in under 30 seconds. This guarantees the exact versions used in our benchmarks.
 
-### 3. Run the final results notebook
-
-```bash
-uv run jupyter notebook notebooks/04_final_results.ipynb
-```
-
-This notebook is the single best entry point. It loads cached benchmark results from `benchmark_results/` (no re-benchmarking needed) and regenerates all plots and summary tables in under 30 seconds. If you want to re-run the full benchmarks from scratch, delete the JSON files in `benchmark_results/` first (takes roughly 30 minutes on Apple M3).
-
 ---
 
 ## Running the Streamlit Demo
@@ -237,8 +229,3 @@ DS-GA-1019/
 - **TinyLlama/Pythia run slowly on your machine:** these are ~9x larger than GPT-2. The cross-model benchmark uses 50 tokens + 5 prompts to keep total runtime under 30 minutes. Reduce further in `notebooks/04_final_results.ipynb` cell 1 (`BENCH_SETTINGS`) if needed.
 - **Running from scratch takes too long:** the final notebook reads cached results from `benchmark_results/*.json`. Keep those files and re-run only the plot cells.
 
----
-
-## Citation
-
-If you find this useful, the code is at [github.com/ranjan2601/DS-GA-1019](https://github.com/ranjan2601/DS-GA-1019) under the `main` branch.
